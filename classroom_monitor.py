@@ -1,5 +1,21 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║        AI CLASSROOM MONITORING SYSTEM  v2.0                     ║
+║        Optimised for  i3 CPU · 8 GB RAM · overhead camera       ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Behaviours : Attentive | Distracted | Looking Down             ║
+║               Talking   | Using Phone                           ║
+║  Visual     : Bounding box + label + score  (NO skeleton)       ║
+╚══════════════════════════════════════════════════════════════════╝
 
+Install once:
+    pip install ultralytics opencv-python mediapipe numpy
 
+Run:
+    python classroom_monitor.py
+
+Press  Q / Esc  to quit.
+"""
 
 import cv2
 import numpy as np
@@ -8,28 +24,28 @@ import math
 import time
 from ultralytics import YOLO
 
-
+# ───────────────────────────────────────────────────────────────────
 #  USER CONFIG
-
-VIDEO_SOURCE     = 0           
+# ───────────────────────────────────────────────────────────────────
+VIDEO_SOURCE     = 0           # 0 = webcam  |  "path/to/video.mp4" for file
 FRAME_W          = 854
 FRAME_H          = 480
 YOLO_IMGSZ       = 320
 YOLO_CONF        = 0.38
-SKIP_FRAMES      = 2           
-MAX_TRACK_DIST   = 130         
-MAX_MISSING      = 25         
+SKIP_FRAMES      = 2           # run YOLO every N frames
+MAX_TRACK_DIST   = 130         # px – max centre shift to match same student
+MAX_MISSING      = 25          # frames before track removed
 
 # Head-direction thresholds
-DISTRACTED_THRESH = 0.10      
-LOOKDOWN_THRESH   = 0.06       
+DISTRACTED_THRESH = 0.10       # yaw ratio  → Distracted (not looking camera)
+LOOKDOWN_THRESH   = 0.06       # pitch ratio → Looking Down
 
 # Talking detection
-TALKING_DIST_PX  = 220         
+TALKING_DIST_PX  = 220         # px – max distance between two talking students
 
-
+# ───────────────────────────────────────────────────────────────────
 #  COLOURS  (BGR)
-
+# ───────────────────────────────────────────────────────────────────
 C_GREEN  = (50,  200,  50)
 C_RED    = (30,   30, 220)
 C_ORANGE = (30,  140, 255)
@@ -48,8 +64,9 @@ BEHAVIOR_COLORS = {
     "Using Phone" : C_RED,
 }
 
+# ───────────────────────────────────────────────────────────────────
 #  MEDIAPIPE FACE MESH  (landmarks used only for maths – not drawn)
-
+# ───────────────────────────────────────────────────────────────────
 _mp_face   = mp.solutions.face_mesh
 _face_mesh = _mp_face.FaceMesh(
     static_image_mode=False,
@@ -106,7 +123,7 @@ def analyse_face(frame: np.ndarray, box: tuple):
     l_eye = pt(LM_L_EYE)
     r_eye = pt(LM_R_EYE)
 
-    # ── Yaw (left / right turn) 
+    # ── Yaw (left / right turn) ───────────────────────────────
     eye_mid_x = (l_eye[0] + r_eye[0]) / 2.0
     eye_span  = max(abs(r_eye[0] - l_eye[0]), 1.0)
     yaw       = (nose[0] - eye_mid_x) / eye_span
@@ -118,7 +135,7 @@ def analyse_face(frame: np.ndarray, box: tuple):
     else:
         h_dir = "Center"
 
-    # ── Pitch (looking down) 
+    # ── Pitch (looking down) ──────────────────────────────────
     eye_mid_y   = (l_eye[1] + r_eye[1]) / 2.0
     face_height = max(y2c - y1c, 1)
     pitch       = (nose[1] - eye_mid_y) / face_height
@@ -127,9 +144,9 @@ def analyse_face(frame: np.ndarray, box: tuple):
     return h_dir, looking_dn
 
 
-
+# ───────────────────────────────────────────────────────────────────
 #  STUDENT TRACK  – weighted-average box smoothing
-
+# ───────────────────────────────────────────────────────────────────
 class StudentTrack:
     _next_id = 1
 
@@ -165,9 +182,9 @@ class StudentTrack:
         return tuple(self._smooth.astype(int))
 
 
-
+# ───────────────────────────────────────────────────────────────────
 #  TRACKING
-
+# ───────────────────────────────────────────────────────────────────
 def update_tracks(tracks: list, detections: list) -> list:
     used = [False] * len(detections)
 
@@ -195,8 +212,9 @@ def update_tracks(tracks: list, detections: list) -> list:
     return [t for t in tracks if t.missing < MAX_MISSING]
 
 
-
-#  PHONE 
+# ───────────────────────────────────────────────────────────────────
+#  PHONE OVERLAP
+# ───────────────────────────────────────────────────────────────────
 def check_phones(tracks: list, phone_boxes: list):
     for t in tracks:
         t.has_phone = False
@@ -206,8 +224,10 @@ def check_phones(tracks: list, phone_boxes: list):
                 t.has_phone = True
                 break
 
-#  BEHAVIOUR CLASSIFICATION
 
+# ───────────────────────────────────────────────────────────────────
+#  BEHAVIOUR CLASSIFICATION
+# ───────────────────────────────────────────────────────────────────
 def classify_all(tracks: list):
     """
     Talking  : two students are close AND face each other
@@ -248,9 +268,9 @@ def classify_all(tracks: list):
             t.score    = 100
 
 
-
+# ───────────────────────────────────────────────────────────────────
 #  DRAWING HELPERS
-
+# ───────────────────────────────────────────────────────────────────
 _FONT  = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -318,7 +338,10 @@ def draw_panel(img, tracks: list, fps: float):
         cv2.putText(img, text, (px, py + (i + 1) * lh),
                     _FONT, 0.50, color, bold, cv2.LINE_AA)
 
-#  MAIn
+
+# ───────────────────────────────────────────────────────────────────
+#  MAIN
+# ───────────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
     print("  AI Classroom Monitor  v2.0  –  loading YOLOv8n …")
@@ -336,10 +359,6 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    WIN = "AI Classroom Monitor  [Q = quit]"
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     tracks:          list[StudentTrack] = []
     cached_persons:  list = []
@@ -359,7 +378,7 @@ def main():
         frame = cv2.resize(frame, (FRAME_W, FRAME_H))
         frame_idx += 1
 
-        # ── YOLO detection
+        # ── YOLO detection ────────────────────────────────────
         if frame_idx % SKIP_FRAMES == 0:
             results = model(
                 frame,
@@ -378,22 +397,22 @@ def main():
                     xyxy = box.xyxy[0].cpu().numpy().astype(int).tolist()
                     (cached_persons if cls == 0 else cached_phones).append(tuple(xyxy))
 
-        # ── Tracking
+        # ── Tracking ──────────────────────────────────────────
         tracks = update_tracks(tracks, cached_persons)
 
-        # ── Phone overlap 
+        # ── Phone overlap ─────────────────────────────────────
         check_phones(tracks, cached_phones)
 
-        # ── Head direction 
+        # ── Head direction ────────────────────────────────────
         if frame_idx % SKIP_FRAMES == 0:
             for t in tracks:
                 h_dir, dn = analyse_face(frame, t.ibox())
                 t.head_dir = "Looking Down" if dn else h_dir
 
-        # ── Behaviour 
+        # ── Behaviour ─────────────────────────────────────────
         classify_all(tracks)
 
-        # ── Render
+        # ── Render ────────────────────────────────────────────
         for t in tracks:
             draw_student(frame, t)
 
@@ -403,7 +422,7 @@ def main():
 
         draw_panel(frame, tracks, fps_smooth)
 
-        cv2.imshow(WIN, frame)
+        cv2.imshow("AI Classroom Monitor  [Q = quit]", frame)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q'), 27):
             break

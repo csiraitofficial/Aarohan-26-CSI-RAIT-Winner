@@ -1,0 +1,134 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+from ultralytics import YOLO
+
+print("Starting Classroom Monitoring...")
+
+# YOLO model
+model = YOLO("yolov8n.pt")
+
+# FaceMesh
+mp_face = mp.solutions.face_mesh
+face_mesh = mp_face.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+# Camera
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+
+tracked_students = {}
+student_id_counter = 0
+frame_count = 0
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_count += 1
+    if frame_count % 2 != 0:
+        continue
+
+    frame = cv2.resize(frame, (320, 240))
+    results = model(frame, imgsz=256, verbose=False)[0]
+
+    student_boxes = []
+    phone_boxes = []
+
+    # Detect objects
+    for box in results.boxes:
+        cls = int(box.cls[0])
+        label = results.names[cls]
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+        if label == "person":
+            student_boxes.append((x1, y1, x2, y2))
+        if label == "cell phone":
+            phone_boxes.append((x1, y1, x2, y2))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(frame, "Phone", (x1, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
+    student_data = {}
+
+    for (x1, y1, x2, y2) in student_boxes:
+        cropped = frame[y1:y2, x1:x2]
+        if cropped.size == 0:
+            continue
+
+        rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        face_results = face_mesh.process(rgb)
+
+        looking_forward = True  # assume attentive unless we detect looking left/right
+
+        if face_results.multi_face_landmarks:
+            face = face_results.multi_face_landmarks[0]
+
+            nose = face.landmark[1]
+            left_eye = face.landmark[33]
+            right_eye = face.landmark[263]
+
+            # Compute horizontal position of nose relative to eyes
+            mid_eye_x = (left_eye.x + right_eye.x) / 2
+            if nose.x < mid_eye_x - 0.05 or nose.x > mid_eye_x + 0.05:
+                # Nose significantly left or right → distracted
+                looking_forward = False
+
+        # Phone detection
+        phone_detected = False
+        for px1, py1, px2, py2 in phone_boxes:
+            if px1 > x1 and px2 < x2 and py1 > y1 and py2 < y2:
+                phone_detected = True
+
+        center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        student_id = None
+        for sid, (px, py) in tracked_students.items():
+            if abs(center[0] - px) < 40 and abs(center[1] - py) < 40:
+                student_id = sid
+                tracked_students[sid] = center
+                break
+
+        if student_id is None:
+            student_id_counter += 1
+            student_id = student_id_counter
+            tracked_students[student_id] = center
+
+        student_data[student_id] = {
+            "box": (x1, y1, x2, y2),
+            "center": center,
+            "phone": phone_detected,
+            "forward": looking_forward
+        }
+
+    # Draw boxes and labels
+    for sid, data in student_data.items():
+        x1, y1, x2, y2 = data["box"]
+        phone = data["phone"]
+        forward = data["forward"]
+
+        color = (0, 255, 255)  # default Distracted (yellow)
+        label = "Distracted"
+
+        if phone:
+            color = (0, 0, 255)
+            label = "Using Phone"
+        elif forward:
+            color = (0, 255, 0)
+            label = "Attentive"
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame,
+                    f"ID:{sid} {label}",
+                    (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2)
+
+    cv2.imshow("Classroom Monitoring", frame)
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
